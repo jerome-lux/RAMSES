@@ -2,10 +2,9 @@ import tensorflow as tf
 import numpy as np
 
 
-@tf.function
+@tf.function(reduce_retracing=True)
 def decode_predictions(seg_preds, scores, threshold=0.5, by_scores=True):
-
-    """ Compute the labeled mask array from segmentation predictions.
+    """Compute the labeled mask array from segmentation predictions.
     If two masks overlap, the one with either the higher score or the higher seg value is chosen
     return labeled array
     inputs:
@@ -19,11 +18,11 @@ def decode_predictions(seg_preds, scores, threshold=0.5, by_scores=True):
     nx, ny = tf.shape(seg_preds)[1], tf.shape(seg_preds)[2]
 
     if by_scores:
-        sorted_scores_inds = tf.argsort(scores, direction='DESCENDING')
+        sorted_scores_inds = tf.argsort(scores, direction="DESCENDING")
         sorted_scores = tf.gather(scores, sorted_scores_inds)
         sorted_masks = tf.gather(binary_masks, sorted_scores_inds)
         # weight masks by their respective scores
-        sorted_masks = tf.transpose(sorted_masks, [1, 2, 0]) * tf.cast(sorted_scores, tf.float32)
+        sorted_masks = tf.cast(tf.transpose(sorted_masks, [1, 2, 0]), tf.float32) * tf.cast(sorted_scores, tf.float32)
         sorted_masks = tf.transpose(sorted_masks, [2, 0, 1])
         # add bg slice
         bg_slice = tf.zeros((1, nx, ny))
@@ -33,7 +32,7 @@ def decode_predictions(seg_preds, scores, threshold=0.5, by_scores=True):
 
     else:
         # Set seg_preds to 0 if < threshold
-        filt_seg = tf.where(seg_preds >= threshold, seg_preds, 0.)
+        filt_seg = tf.where(seg_preds >= threshold, seg_preds, 0.0)
         bg_slice = tf.zeros((1, nx, ny))
         labeled_masks = tf.concat([bg_slice, filt_seg], axis=0)
         labeled_masks = tf.math.argmax(labeled_masks, axis=0)
@@ -42,16 +41,18 @@ def decode_predictions(seg_preds, scores, threshold=0.5, by_scores=True):
 
 
 @tf.function
-def compute_solo_cls_targets(inputs,
-                             shape,
-                             strides=[4, 8, 16, 32, 64],
-                             grid_sizes=[64, 36, 24, 16, 12],
-                             scale_ranges=[[1, 96], [48, 192], [96, 384], [192, 768], [384, 2048]],
-                             mode='diag',
-                             offset_factor=0.25):
+def compute_cls_targets(
+    inputs,
+    shape,
+    strides=[4, 8, 16, 32, 64],
+    grid_sizes=[64, 36, 24, 16, 12],
+    scale_ranges=[[1, 96], [48, 192], [96, 384], [192, 768], [384, 2048]],
+    mode="diag",
+    offset_factor=0.5,
+):
     """
     inputs:
-        (bboxes, labels, classes, masks)
+        (bboxes, labels, classes, masks, normalized densities)
         bboxes: [n, 4] in *normalized coordinates*
         labels: [n] labels of objects
         classes: [n] class ids
@@ -63,12 +64,15 @@ def compute_solo_cls_targets(inputs,
         mode: either 'min': min(dx, dy) of 'diag': sqrt(dx*dy)
         offset_factor: control the size of the positive box (cx +/- offset_factor*dx*0.5, cy +/- offset_factor*dy*0.5). dx, dy = box side lentghs
         default 0.5 (half-box)
-
     """
+
     bboxes = inputs[0]
     labels = inputs[1]
     classes = inputs[2]
     masks = inputs[3]
+    densities = inputs[4]
+
+    offset_factor = offset_factor * 0.5
 
     # OHE with bg
     maxlabel = tf.reduce_max(labels)
@@ -80,14 +84,14 @@ def compute_solo_cls_targets(inputs,
     maxdim = tf.maximum(nx, ny)
 
     # bboxes size x0, y0, x1, y1 where x1 and y1 are OUTSIDE the box
-    dx = tf.maximum((bboxes[..., 2] - bboxes[..., 0]) * (nx - 1) - 1, 0.)
-    dy = tf.maximum((bboxes[..., 3] - bboxes[..., 1]) * (ny - 1) - 1, 0.)
+    dx = tf.maximum((bboxes[..., 2] - bboxes[..., 0]) * (nx - 1), 0.0)
+    dy = tf.maximum((bboxes[..., 3] - bboxes[..., 1]) * (ny - 1), 0.0)
 
     dmin = tf.math.minimum(dx, dy)
 
-    if mode == 'min':
+    if mode == "min":
         object_scale = dmin
-    elif mode == 'max':
+    elif mode == "max":
         object_scale = tf.math.maximum(dx, dy)
     else:
         object_scale = tf.math.sqrt(dx * dy)
@@ -96,13 +100,17 @@ def compute_solo_cls_targets(inputs,
     bboxes_per_lvl = []
     labels_per_lvl = []
     cls_per_lvl = []
+    densities_by_lvl = []
 
     # Get object ids for each FPN level
     for lvl, (minsize, maxsize) in enumerate(scale_ranges):
         if lvl + 1 < len(grid_sizes) - 1:
             filtered_idx = tf.where(
-                (((object_scale >= minsize) & (object_scale <= maxsize) & (dmin >= strides[lvl])) |
-                    ((object_scale > maxsize) & (dmin < strides[lvl + 1]) & (dmin >= strides[lvl]))))
+                (
+                    ((object_scale >= minsize) & (object_scale <= maxsize) & (dmin >= strides[lvl]))
+                    | ((object_scale > maxsize) & (dmin < strides[lvl + 1]) & (dmin >= strides[lvl]))
+                )
+            )
         else:
             filtered_idx = tf.where(object_scale >= minsize)
 
@@ -110,45 +118,44 @@ def compute_solo_cls_targets(inputs,
         bboxes_per_lvl.append(tf.gather_nd(bboxes, filtered_idx))
         labels_per_lvl.append(tf.gather_nd(labels, filtered_idx))
         cls_per_lvl.append(tf.cast(tf.gather_nd(classes, filtered_idx), tf.int32))
+        densities_by_lvl.append(tf.cast(tf.gather_nd(densities, filtered_idx), tf.float32))
 
-    classes_targets = []
-    labels_targets = []
+    class_targets = []
+    label_targets = []
+    density_targets = []
 
     for lvl, gridsize in enumerate(grid_sizes):
 
-        #Create empty target image
-        lvl_imshape = (gridsize * nx//maxdim, gridsize * ny//maxdim)
+        # Create empty target image
+        lvl_imshape = ((gridsize * nx) // maxdim, (gridsize * ny) // maxdim)
 
         cls_img = tf.zeros(lvl_imshape, dtype=tf.int32)
         labels_img = tf.zeros(lvl_imshape, dtype=tf.int32)
+        densities_img = tf.zeros(lvl_imshape, dtype=tf.float32)
 
         if len(cls_per_lvl[lvl]) > 0:
-            # compute  areas of boxes -could use area of masks instead...
-            sq_areas = (bboxes_per_lvl[lvl][..., 2]-bboxes_per_lvl[lvl][..., 0]
-                        ) * (bboxes_per_lvl[lvl][..., 3]-bboxes_per_lvl[lvl][..., 1])
+            # compute  areas of boxes - we could use area of masks instead...
+            sq_areas = (bboxes_per_lvl[lvl][..., 2] - bboxes_per_lvl[lvl][..., 0]) * (
+                bboxes_per_lvl[lvl][..., 3] - bboxes_per_lvl[lvl][..., 1]
+            )
             # sort by descending areas. if two targets overlap, it is the smallest box that have priority
-            ordered_boxes_indices = tf.argsort(sq_areas, axis=-1, direction='DESCENDING')
-            # reorder the bboxes tensor and corresponding labels
+            ordered_boxes_indices = tf.argsort(sq_areas, axis=-1, direction="DESCENDING")
+            # reorder the bboxes tensor and corresponding labels, so that when two boxes overlap, priority is given to the smaller object
             # ordered_bboxes_lvl = tf.gather(bboxes_per_lvl[lvl], ordered_boxes_indices)
             ordered_labels = tf.gather(labels_per_lvl[lvl], ordered_boxes_indices)
+            ordered_cls = tf.gather(cls_per_lvl[lvl], ordered_boxes_indices)
+            ordered_densities = tf.gather(densities_by_lvl[lvl], ordered_boxes_indices)
 
             # Now generate the targets
             lvl_nx, lvl_ny = lvl_imshape
             lvl_nx = tf.cast(lvl_nx, tf.float32)
             lvl_ny = tf.cast(lvl_ny, tf.float32)
-            # Denormed boxes in current levels coordinates
-            # x0 = tf.math.maximum(ordered_bboxes_lvl[..., 0] * lvl_nx-1, 0)
-            # x1 = tf.math.minimum(ordered_bboxes_lvl[..., 2] * lvl_nx-1, lvl_nx-1)
-            # y0 = tf.math.maximum(ordered_bboxes_lvl[..., 1] * lvl_ny-1, 0)
-            # y1 = tf.math.minimum(ordered_bboxes_lvl[..., 3] * lvl_ny-1, lvl_ny-1)
-            # denorm_boxes_lvl = tf.stack([x0, y0, x1, y1], -1)
-            # denorm_boxes_lvl = tf_denormalize_bboxes(ordered_bboxes_lvl, lvl_nx, lvl_ny)
 
             # Get locations coordinates fo this level [*in current image coordinates !*]
             locations_lvl = tf.cast(compute_locations(1, lvl_imshape), tf.float32)
 
             # GT targets are located inside the box reduced by the offset_factor
-            for i in tf.range(0, tf.shape(cls_per_lvl[lvl])[0]):
+            for i in tf.range(0, tf.shape(cls_per_lvl[lvl])[0]):  # iterating the n objects in the level
 
                 # box = denorm_boxes_lvl[i, ...]
                 lab = ordered_labels[i]
@@ -163,19 +170,16 @@ def compute_solo_cls_targets(inputs,
                 dx = tf.cast(dx, tf.float32) / tf.cast((tf.shape(masks)[0] - 1), tf.float32)
                 dy = tf.cast(dy, tf.float32) / tf.cast((tf.shape(masks)[1] - 1), tf.float32)
 
-                # inside_indices = tf.where((locations_lvl[:, 0] >= tf.math.floor(cx - x_offset)) &
-                #                           (locations_lvl[:, 0] <= tf.math.ceil(cx + x_offset)) &
-                #                           (locations_lvl[:, 1] >= tf.math.floor(cy - y_offset)) &
-                #                           (locations_lvl[:, 1] <= tf.math.ceil(cy + y_offset)))
-                inside_indices = tf.where((locations_lvl[:, 0] >= lvl_nx * (cx - dx * offset_factor) - 0.5) &
-                                          (locations_lvl[:, 0] < lvl_nx * (cx + dx * offset_factor) - 0.5) &
-                                          (locations_lvl[:, 1] >= lvl_ny * (cy - dy * offset_factor) - 0.5) &
-                                          (locations_lvl[:, 1] < lvl_ny * (cy + dy * offset_factor) - 0.5))
+                inside_indices = tf.where(
+                    (locations_lvl[:, 0] >= (lvl_nx - 1) * (cx - dx * offset_factor))
+                    & (locations_lvl[:, 0] <= (lvl_nx - 1) * (cx + dx * offset_factor))
+                    & (locations_lvl[:, 1] >= (lvl_ny - 1) * (cy - dy * offset_factor))
+                    & (locations_lvl[:, 1] <= (lvl_ny - 1) * (cy + dy * offset_factor))
+                )
 
-                cx = tf.maximum(tf.cast(tf.math.round(lvl_nx * cx - 0.5), tf.int32), 0)
-                cy = tf.maximum(tf.cast(tf.math.round(lvl_ny * cy - 0.5), tf.int32), 0)
-                center = tf.where((tf.cast(locations_lvl[:, 0], tf.int32) == cx) &
-                                 (tf.cast(locations_lvl[:, 1], tf.int32) == cy))
+                cx = tf.maximum(tf.cast(tf.math.round((lvl_nx - 1) * cx), tf.int32), 0)
+                cy = tf.maximum(tf.cast(tf.math.round((lvl_ny - 1) * cy), tf.int32), 0)
+                center = tf.where((tf.cast(locations_lvl[:, 0], tf.int32) == cx) & (tf.cast(locations_lvl[:, 1], tf.int32) == cy))
                 inside_indices = tf.concat([center, inside_indices], axis=0)
 
                 inside_xc = tf.gather(locations_lvl[:, 0], inside_indices)
@@ -185,18 +189,26 @@ def compute_solo_cls_targets(inputs,
                 inside_coords = tf.cast(tf.stack([inside_xc, inside_yc], -1), tf.int32)
 
                 cls_img = tf.tensor_scatter_nd_update(
-                    cls_img, inside_coords, tf.zeros(tf.shape(inside_coords)[0], dtype=tf.int32) + cls_per_lvl[lvl][i])
+                    cls_img, inside_coords, tf.zeros(tf.shape(inside_coords)[0], dtype=tf.int32) + ordered_cls[i]
+                )
                 labels_img = tf.tensor_scatter_nd_update(
-                    labels_img, inside_coords, tf.zeros(tf.shape(inside_coords)[0], dtype=tf.int32) + ordered_labels[i])
+                    labels_img, inside_coords, tf.zeros(tf.shape(inside_coords)[0], dtype=tf.int32) + ordered_labels[i]
+                )
+                densities_img = tf.tensor_scatter_nd_update(
+                    densities_img, inside_coords, tf.zeros(tf.shape(inside_coords)[0], dtype=tf.float32) + ordered_densities[i]
+                )
+
         # Append the flattened targets
 
-        classes_targets.append(tf.reshape(cls_img, [-1]))
-        labels_targets.append(tf.reshape(labels_img, [-1]))
+        class_targets.append(tf.reshape(cls_img, [-1]))
+        label_targets.append(tf.reshape(labels_img, [-1]))
+        density_targets.append(tf.reshape(densities_img, [-1]))
 
-    classes_targets = tf.concat(classes_targets, 0)
-    labels_targets = tf.concat(labels_targets, 0)
+    class_targets = tf.concat(class_targets, 0)
+    label_targets = tf.concat(label_targets, 0)
+    density_targets = tf.concat(density_targets, 0)
 
-    return classes_targets, labels_targets
+    return class_targets, label_targets, density_targets
 
 
 @tf.function
@@ -218,12 +230,12 @@ def compute_mask_targets(gt_masks, gt_labels):
 
 
 @tf.function
-def compute_locations(stride, shape, shift='r'):
+def compute_locations(stride, shape, shift="r"):
     """Compute list of pixels coordinates for a given stride and shape
     if shift == 'r' or 'right, the first point is s//2 else, s//2-1
     """
 
-    if shift.lower() in ['r', 'right']:
+    if shift.lower() in ["r", "right"]:
         begin = stride // 2
     else:
         begin = stride // 2 - 1
@@ -245,16 +257,16 @@ def tf_normalize_bboxes(bboxes, nx, ny):
 
 
 @tf.function
-def tf_denormalize_bboxes(norm_bboxes, nx, ny, rounding='larger'):
+def tf_denormalize_bboxes(norm_bboxes, nx, ny, rounding="larger"):
 
     nx = tf.cast(nx, tf.float32)
     ny = tf.cast(ny, tf.float32)
-    if rounding == 'larger':
+    if rounding == "larger":
         x0 = tf.math.maximum(tf.math.floor(norm_bboxes[..., 0] * nx), 0)
         x1 = tf.math.minimum(tf.math.ceil(norm_bboxes[..., 2] * nx), nx)
         y0 = tf.math.maximum(tf.math.floor(norm_bboxes[..., 1] * ny), 0)
         y1 = tf.math.minimum(tf.math.ceil(norm_bboxes[..., 3] * ny), ny)
-    elif rounding == 'even':
+    elif rounding == "even":
         x0 = tf.math.maximum(tf.math.round(norm_bboxes[..., 0] * nx), 0)
         x1 = tf.math.minimum(tf.math.round(norm_bboxes[..., 2] * nx), nx)
         y0 = tf.math.maximum(tf.math.round(norm_bboxes[..., 1] * ny), 0)
@@ -288,3 +300,70 @@ def denormalize_bboxes(norm_bboxes, nx, ny):
     bboxes[..., 2] = np.minimum(np.around(norm_bboxes[..., 2] * nx), nx)
     bboxes[..., 3] = np.minimum(np.around(norm_bboxes[..., 3] * ny), ny)
     return bboxes
+
+
+def crop_to_aspect_ratio(target_shape, image):
+    """Crop an image so that its aspect ratio is the same as target_shape
+    it does not resize the image !
+    """
+
+    ratio = target_shape[0] / target_shape[1]
+
+    nx, ny = image.shape[:2]
+
+    target_nx = min(int(np.around(ny * ratio)), nx)
+    target_ny = int(np.around(target_nx / ratio))
+
+    cropx = nx - target_nx
+    cropy = ny - target_ny
+    cx = cropx // 2
+    cy = cropy // 2
+    rx = np.abs(cropx) % 2
+    ry = np.abs(cropy) % 2
+
+    if image.ndim > 3:
+        print("pad_to_aspect_ratio only support gray or RGB 2D images")
+
+    if cropx > 0:
+        if image.ndim == 3:
+            image = image[cx : -rx - cx, ...]
+        elif image.ndim == 2:
+            image = image[cx : -rx - cx]
+
+    if cropy > 0:
+        if image.ndim == 3:
+            image = image[:, cy : -cy - ry, :]
+        elif image.ndim == 2:
+            image = image[:, cy : -cy - ry]
+
+    return image, ((cx, rx + cx), (cy, cy + ry))
+
+
+def pad_to_aspect_ratio(target_shape, image):
+    """Pad an image so that its aspect ratio is the same as target_shape
+    it does not resize the image !
+    """
+
+    ratio = target_shape[0] / target_shape[1]
+
+    nx, ny = image.shape[:2]
+
+    target_nx = max(int(np.around(ny * ratio)), nx)
+    target_ny = int(np.around(target_nx / ratio))
+
+    padx = target_nx - nx
+    pady = target_ny - ny
+    px = padx // 2
+    py = pady // 2
+    rx = np.abs(padx) % 2
+    ry = np.abs(pady) % 2
+
+    if padx > 0 or pady > 0:
+        if image.ndim == 3:
+            image = np.pad(image, ((px, px + rx), (py, py + ry), (0, 0)))
+        elif image.ndim == 2:
+            image = np.pad(image, ((px, px + rx), (py, py + ry)))
+        else:
+            print("pad_to_aspect_ratio only support gray or RGB 2D images")
+
+    return image, ((px, px + rx), (py), py + ry)

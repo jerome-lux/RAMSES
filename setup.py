@@ -3,9 +3,9 @@
 from setuptools import setup
 
 setup(
-    name="autoRAC",
+    name="ISMENet",
     version="1",
     author="J. Lux",
-    description="autoRAC",
-    packages=["autoRAC"]
+    description="ISMENet",
+    packages=["ISMENet"]
 )
