@@ -66,7 +66,6 @@ class csvDataLoader:
         self.crop_to_aspect_ratio = crop_to_aspect_ratio
         self.ratio = input_shape[0] / input_shape[1]
         self.minres = minres
-        self.shuffle = shuffle
         self.seed = seed
         self.augmentation_func = augmentation_func
 
@@ -136,7 +135,6 @@ class csvDataLoader:
         data["maxinst"] = self.maxinst
         data["max_inst_per_cls"] = self.max_inst_per_cls
         data["seed"] = self.seed
-        data["shuffle"] = self.shuffle
         data["train_class_counts"] = {str(k): int(v) for k, v in self.train_class_counts.items()}
         data["valid_class_counts"] = {str(k): int(v) for k, v in self.valid_class_counts.items()}
 
@@ -174,7 +172,7 @@ class csvDataLoader:
             }
             self.valid_class_counts.update(inst_cls_value_count)
 
-    def _populate_set(self, basenames, annotations, nmax, exclude=[], not_counting=[], max_reuse=3):
+    def _populate_set(self, basenames, annotations, nmax, exclude=[], not_counting=[], max_reuse=3, shuffle=True):
 
         """ Génère un ensemble d'images (provenant du dataframe annotations) selon differents critères
         renvoie la liste des noms et un dictionnaire du nombre d'instance par classe
@@ -194,7 +192,7 @@ class csvDataLoader:
             add_instances = False
             img_left_per_class = {c: 0 for c in self.classes}
 
-            if self.shuffle:
+            if shuffle:
                 rng.shuffle(basenames)
 
             print(f"Adding images, iteration {it_counter}     ")  # , end="\r")
@@ -239,6 +237,34 @@ class csvDataLoader:
 
         return results_basenames, cls_inst_counter
 
+    def filter_set(self, ds_id=None, hasmass=True, method='notin'):
+
+        """filter an existing train/valid dataset using ds id and mass
+        """
+        # Filter annotation dataframe
+
+        if hasmass:
+            filtered_anns = self.annotations.loc[np.isfinite(self.annotations["mass"])]
+        else:
+            filtered_anns = self.annotations
+
+        if  ds_id is not None:
+            if method == 'notin':
+                filtered_anns = filtered_anns.loc[filtered_anns["id"] != ds_id]
+            else:
+                filtered_anns = filtered_anns.loc[filtered_anns["id"] == ds_id]
+
+        filtered_basenames = filtered_anns["baseimg"].unique().tolist()
+
+        new_train_basenames = [b for b in self.train_basenames if b in filtered_basenames]
+        new_valid_basenames = [b for b in self.valid_basenames if b in filtered_basenames]
+
+        self.train_basenames = new_train_basenames
+        self.valid_basenames = new_valid_basenames
+        self.update_info()
+        self.build(self.train_basenames)
+        self.build(self.valid_basenames)
+
     def create_set(
         self,
         n=100,
@@ -251,6 +277,7 @@ class csvDataLoader:
         dataset_name=None,
         constraint='in',
         mass=False,
+        shuffle=True,
     ):
         """
         Create training or validation set with n elements by oversampling if needed.
@@ -274,7 +301,7 @@ class csvDataLoader:
         if seed is not None:
             self.seed = seed
 
-        if self.shuffle:
+        if shuffle:
             rng = np.random.default_rng(self.seed)
             rng.shuffle(self.basenames)
 
@@ -315,6 +342,7 @@ class csvDataLoader:
             exclude=exclude,
             not_counting=not_counting,
             max_reuse=max_reuse,
+            shuffle=shuffle
         )
 
         if append:
@@ -348,6 +376,7 @@ class csvDataLoader:
         append=False,
         dataset_name=None,
         mass=False,
+        shuffle=True,
     ):
         """
         Create training and validation sets with ntrain and nval elements by oversampling if needed.
@@ -364,7 +393,7 @@ class csvDataLoader:
 
         self.seed = seed
 
-        if self.shuffle:
+        if shuffle:
             rng = np.random.default_rng(self.seed)
             rng.shuffle(self.basenames)
 
@@ -401,6 +430,7 @@ class csvDataLoader:
             exclude=exclude,
             not_counting=not_counting,
             max_reuse=max_reuse,
+            shuffle=shuffle
         )
         print(f"Creating set with an objective of {nval} valid intances in {text}")
         print(f"Using {len(temp_valid_basenames)} images")
@@ -412,6 +442,7 @@ class csvDataLoader:
             exclude=exclude,
             not_counting=not_counting,
             max_reuse=max_reuse,
+            shuffle=shuffle
         )
 
         if append:
@@ -442,7 +473,7 @@ class csvDataLoader:
 
         self.seed = seed
 
-        if self.shuffle:
+        if shuffle:
             rng = np.random.default_rng(self.seed)
             rng.shuffle(self.basenames)
 
@@ -499,7 +530,7 @@ class csvDataLoader:
         self.valid_dataset = self.build(self.valid_basenames)
 
     def filter_annotations(self):
-        """Remove images which do match the input constraints (excluded classes, objects in crop zone, not enough instances, etc.)
+        """Remove images which do match the input constraints from the annotations dataframe (excluded classes, objects in crop zone, not enough instances, etc.)
         also verify that both image and label files exist
         """
 
@@ -510,9 +541,9 @@ class csvDataLoader:
 
         self.skip = []
 
-        if self.shuffle:
-            rng = np.random.default_rng(self.seed)
-            rng.shuffle(baseimgnames)
+        # if self.shuffle:
+        #     rng = np.random.default_rng(self.seed)
+        #     rng.shuffle(baseimgnames)
 
         temp_cls_list = self.annotations["class"].unique().tolist()
         cls_inst_counter = {c: 0 for c in temp_cls_list}
