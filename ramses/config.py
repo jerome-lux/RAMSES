@@ -33,7 +33,6 @@ class Config:
         self.extra_FPN_layers = 1  # layers after P5. Strides must correspond to the number of FPN layers !
 
         # SOLO head
-        self.head_filters = [256, 256, 256, 256]  # Filters per stage
         self.strides = [4, 8, 16, 32, 64]  # strides of FPN levels
         self.head_layers = 4  # Number of repeats of head conv layers
         self.head_filters = 256
