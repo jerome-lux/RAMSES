@@ -19,7 +19,7 @@ def eval(
 ):
     """Compute AP score and mAP
     inputs:
-    model: ISMENet model
+    model: RAMSES model
     dataset:  an instance of tf.Dataset
     annotations: a pandas DataFrame containing the data for each instance and image
     scaling: image downsampling ratio (input_shape / original_imshape)
@@ -41,7 +41,6 @@ def eval(
     # TODO: include height and width info in the dataloader attributes?
 
     TODO: deal with multiple positive predictions for the same GT object
-    TODO: evaluate mass prediction (add resolution, etc.)
     """
 
     default_kwargs = {
@@ -75,11 +74,19 @@ def eval(
         if gt_img.ndim < 4:
             gt_img = gt_img[tf.newaxis]
 
-        seg_preds, scores, cls_labels, norm_masses = model(gt_img, training=False, **default_kwargs)
+        OK = False
+
+        while not OK:
+            try:
+                seg_preds, scores, cls_labels, norm_masses = model(gt_img, training=False, **default_kwargs)
+                OK = True
+            except:
+                OK = False
+
         seg_preds = seg_preds[0, ...].to_tensor()  # because the model outputs ragged_tensors
         scores = scores[0, ...]
         cls_labels = cls_labels[0, ...] + 1
-        masses = masses[0, ...]
+        norm_masses = norm_masses[0, ...]
 
         mask_stride = gt_img.shape[1] / seg_preds.shape[0]
         scale_factor = 10 * scaling / mask_stride

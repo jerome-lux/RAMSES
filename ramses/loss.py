@@ -15,7 +15,7 @@ def compute_image_loss(
     compute_seg_loss=True,
     compute_cls_loss=True,
     compute_density_loss=True,
-    label_smoothing=0.1
+    label_smoothing=0.1,
 ):
     """Compute the loss for one image
     inputs:
@@ -108,10 +108,10 @@ def compute_image_loss(
             seg_loss = tf.math.divide_no_nan(seg_loss, tf.cast(tf.shape(pos_idx)[0], tf.float32))
 
     if compute_cls_loss:
-        # cls_loss = focal_loss(cls_pred, cls_targets)
-        cls_loss = tf.keras.losses.CategoricalFocalCrossentropy(
-            reduction="sum", alpha=0.25, gamma=2.0, from_logits=False, label_smoothing=label_smoothing, axis=-1
-        )(cls_pred, cls_targets)
+        cls_loss = focal_loss(cls_pred, cls_targets)
+        # cls_loss = tf.keras.losses.CategoricalFocalCrossentropy(
+        #     alpha=0.25, gamma=2.0, from_logits=False, label_smoothing=label_smoothing, axis=-1
+        # )(cls_targets[tf.newaxis, ...], cls_pred[tf.newaxis, ...])
 
     return cls_loss * weights[0], seg_loss * weights[1], density_loss * weights[2]
 

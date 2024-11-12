@@ -783,7 +783,9 @@ class csvDataLoader:
         # Image is already normalized when using tf.io
         imgname = os.path.join(np.array(data["folder"])[0], "images", str_name + ".jpg")
         labelname = os.path.join(np.array(data["folder"])[0], "labels", str_name + ".png")
-        image = tf.io.decode_image(tf.io.read_file(imgname), channels=3, dtype=tf.float32)
+        # image = tf.io.decode_image(tf.io.read_file(imgname), channels=3, dtype=tf.float32)
+        image = np.array(Image.open(imgname)) / 255.
+        image = tf.cast(image, tf.float32)
         # mask = tf.io.decode_image(tf.io.read_file(labelname), channels=1, dtype=tf.uint16)
         mask = np.array(Image.open(labelname)).astype(np.int32)[..., tf.newaxis]  # PIL automatically finds the dtype
         nx, ny = tf.shape(image)[0].numpy(), tf.shape(image)[1].numpy()

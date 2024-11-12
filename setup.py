@@ -3,9 +3,9 @@
 from setuptools import setup
 
 setup(
-    name="ISMENet",
+    name="RAMSES",
     version="1",
     author="J. Lux",
-    description="ISMENet",
-    packages=["ISMENet"]
+    description="Recycled Aggregates Mass Estmation and Segmentation RAMSES",
+    packages=["ramses"]
 )

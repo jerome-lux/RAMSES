@@ -11,7 +11,7 @@ from tensorflow.keras.layers import ZeroPadding2D
 from skimage.color import label2rgb
 from skimage.measure import regionprops
 from skimage.measure import find_contours, approximate_polygon
-import ISMENet
+import RAMSES
 from . import utils
 from .visualization import _COLORS
 from scipy.ndimage import distance_transform_edt
@@ -163,9 +163,9 @@ def predict(
             config = json.load(configfile)
 
         # Creating architecture using config file
-        modelconf = ISMENet.Config(**config)
+        modelconf = RAMSES.Config(**config)
 
-        model = ISMENet.model.ISMENetModel(modelconf)
+        model = RAMSES.model.RAMSESModel(modelconf)
         print(f"Loading model {model_file}...", end="")
         # Loading weights
         model.load_weights(model_file, by_name=False, skip_mismatch=False).expect_partial()
@@ -524,7 +524,6 @@ def stream_predict(
     bgcolor = np.array(bgcolor) / 255.0
 
     if model is None:
-        tf.keras.backend.clear_session()
         model_directory = os.path.dirname(model_file)
         if model_directory is None:
             print("Please give a model file or tf model")
@@ -534,9 +533,9 @@ def stream_predict(
             config = json.load(configfile)
 
         # Creating architecture using config file
-        modelconf = ISMENet.Config(**config)
+        modelconf = RAMSES.Config(**config)
 
-        detector = ISMENet.model.ISMENetModel(modelconf)
+        detector = RAMSES.model.RAMSESModel(modelconf)
         print(f"Loading model {model_file}...", end="")
         # Loading weights
         detector.load_weights(model_file, by_name=False, skip_mismatch=False).expect_partial()
@@ -611,17 +610,15 @@ def stream_predict(
         imgname = os.path.basename(full_path)
 
         print(
-            "Processing image {} ({}/{})".format(imgname, counter, len(img_dict)),
+            "Processing image {} ({}/{}). ".format(imgname, counter, len(img_dict)),
             end="",
         )
-
-        # impath = img_dict[imgname]
-        # PILimg = Image.open(impath)
-        # fullsize_image = np.array(PILimg) / 255.0
 
         fullsize_image = tf.io.decode_image(tf.io.read_file(full_path), channels=3, dtype=tf.float32).numpy()
 
         if crop_to_aspect_ratio:
+            # Crop the image (no resizing here !)
+            print(f"Cropping the image to {imsize[0]/imsize[1]} aspect ratio (nx/ny). ", end= "")
             fullsize_image, _ = utils.crop_to_aspect_ratio(imsize, fullsize_image)
 
         fullsize_nx, fullsize_ny = fullsize_image.shape[:2]
@@ -632,12 +629,12 @@ def stream_predict(
         ratio = image.shape[0] / fullsize_nx
         if image.shape[1] / fullsize_ny != ratio:
             print(
-                f"Warning: downscaling ratio is not the same in both directions: ({ratio}, {image.shape[1] / fullsize_ny})"
+                f"\n Warning: downscaling ratio is not the same in both directions: ({ratio}, {image.shape[1] / fullsize_ny})"
             )
         padding = ((0, 0), (0, 0))
         if fullsize_ny / fullsize_nx != ny / nx:
             image, padding = utils.pad_to_aspect_ratio((nx, ny), image)
-
+            print(f"Padding the image: {padding}. ", end="")
         img_counter += 1
 
         # Get network predictions
@@ -664,7 +661,7 @@ def stream_predict(
 
         if mask_stride != ny // labeled_masks.shape[1]:
             print(
-                f"Warning: mask stride is not equal in both directions: ({mask_stride}, {ny / labeled_masks.shape[1]})"
+                f"\n Warning: mask stride is not equal in both directions: ({mask_stride}, {ny / labeled_masks.shape[1]})"
             )
 
         # Resize and delete padding
@@ -761,6 +758,7 @@ def stream_predict(
             data["max_inscribed_radius"].extend(max_inscribed_radius.tolist())
 
             if save_imgs:
+                # TODO: use vizualization functions to plot classes and scores
                 vizuname = "VIZU-{}.jpg".format(os.path.splitext(imgname)[0])
                 bd = sk.segmentation.find_boundaries(fullsize_masks, connectivity=2, mode="inner", background=0)
                 vizu = label2rgb(fullsize_masks, filtered_image, alpha=0.25, bg_label=0, colors=_COLORS, saturation=1)
@@ -768,7 +766,7 @@ def stream_predict(
                 vizu = np.around(255 * vizu).astype(np.uint8)
                 Image.fromarray(vizu).save(os.path.join(VIZU_DIR, vizuname))
 
-        elif up_indexes.size > 0:
+        else:
 
             print(", all detected instances touch the edges")
 
@@ -810,13 +808,14 @@ def stream_predict(
 
                 o_fullsize_nx, o_fullsize_ny = fullsize_overlap_image.shape[0], fullsize_overlap_image.shape[1]
 
-                # resize the image to the network's input size
+                # resize the image to the network's input size using padding
                 overlap_image, o_padding = utils.pad_to_aspect_ratio((nx, ny), fullsize_overlap_image)
+                overlap_shape_after_padding = overlap_image.shape
                 overlap_image = tf.image.resize(overlap_image, (nx, ny), antialias=True)
-                o_ratio = overlap_image.shape[0] / o_fullsize_nx
+                o_ratio = overlap_image.shape[1] / overlap_shape_after_padding[1]
 
                 # Get network predictions
-                o_seg_preds, o_scores, o_cls_labels, o_densities = detector(image[tf.newaxis, ...], training=False, **default_kwargs)
+                o_seg_preds, o_scores, o_cls_labels, o_densities = detector(overlap_image[tf.newaxis, ...], training=False, **default_kwargs)
 
                 # Because batchsize=1
                 o_seg_preds = o_seg_preds[0].numpy()

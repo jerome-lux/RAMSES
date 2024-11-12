@@ -14,10 +14,10 @@ def decode_predictions(seg_preds, scores, threshold=0.5, by_scores=True):
     by_score (bool): if True, rank the masks by score, else, rank each pixel by their seg_pred value.
     """
     seg_preds = seg_preds.to_tensor()
-    binary_masks = tf.where(seg_preds >= threshold, 1, 0)
     nx, ny = tf.shape(seg_preds)[1], tf.shape(seg_preds)[2]
 
     if by_scores:
+        binary_masks = tf.where(seg_preds >= threshold, 1, 0)
         sorted_scores_inds = tf.argsort(scores, direction="DESCENDING")
         sorted_scores = tf.gather(scores, sorted_scores_inds)
         sorted_masks = tf.gather(binary_masks, sorted_scores_inds)
@@ -26,7 +26,7 @@ def decode_predictions(seg_preds, scores, threshold=0.5, by_scores=True):
         sorted_masks = tf.transpose(sorted_masks, [2, 0, 1])
         # add bg slice
         bg_slice = tf.zeros((1, nx, ny))
-        labeled_masks = tf.concat([bg_slice, binary_masks], axis=0)
+        labeled_masks = tf.concat([tf.cast(bg_slice, tf.int32), binary_masks], axis=0)
         # Take argmax (e.g. mask swith higher scores, when two masks overlap)
         labeled_masks = tf.math.argmax(labeled_masks, axis=0)
 

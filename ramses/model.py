@@ -22,7 +22,7 @@ PRE_NMS = 1024
 NORM_DICT = {"bn": layers.BatchNormalization, "gn": layers.GroupNormalization, "ln": layers.LayerNormalization}
 
 
-def ISMENet_head(
+def RAMSES_head(
     ncls,
     filters_in,
     conv_filters=256,
@@ -30,13 +30,13 @@ def ISMENet_head(
     head_layers=4,
     cls_factor_layers=2,
     activation="gelu",
-    name="ISMENet_head",
+    name="RAMSES_head",
     normalization="gn",
     normalization_kw={"groups": 32},
     block_params=None,
     **kwargs,
 ):
-    """ISMENet Shared head (class, kernel) + class factor
+    """RAMSES Shared head (class, kernel) + class factor
     For each level i of the FPN, the spatial extent is Si x Si
     the depth is nclass, kernel_filters and 1 for class, kernel and class_factor outputs respectively
     (kernel_filters must be equal to ks**2 * k_depth)
@@ -46,7 +46,7 @@ def ISMENet_head(
     NORM = partial(NORM, **normalization_kw)
 
     if name is None:
-        name = "ISMENet_head"
+        name = "RAMSES_head"
 
     input_tensor = tf.keras.Input(shape=(None, None, filters_in), name=name + "_input")
 
@@ -146,7 +146,7 @@ def ISMENet_head(
     return tf.keras.Model(inputs=input_tensor, outputs=[class_head, class_factor_head, kernel_head], name=name)
 
 
-def ISMENet_mask_head(
+def RAMSES_mask_head(
     fpn_features,
     nconv=2,
     in_ch=258,
@@ -158,7 +158,7 @@ def ISMENet_mask_head(
     normalization="gn",
     normalization_kw={"groups": 32},
 ):
-    """Compute the unified mask representation used in ISMENet and the geometrical feature maps for mass estimation
+    """Compute the unified mask representation used in RAMSES and the geometrical feature maps for mass estimation
     fpn_features: list of feature maps from pyramid network P2 to Pn
     Resize, 3x3 conv and add all feature maps
     in_ch: input depth of feature maps
@@ -259,8 +259,8 @@ def ISMENet_mask_head(
     return seg_outputs, geom_feats
 
 
-def ISMENet(config):
-    """Create the ISMENet model using the given config object"""
+def RAMSES(config):
+    """Create the RAMSES model using the given config object"""
 
     if config.load_backbone:
         backbone = tf.keras.models.load_model(config.backbone)
@@ -279,7 +279,7 @@ def ISMENet(config):
 
     fpn_features = FPN(FPN_inputs, pyramid_filters=config.FPN_filters, extra_layers=config.extra_FPN_layers)
 
-    head_model = ISMENet_head(
+    head_model = RAMSES_head(
         ncls=config.ncls,
         filters_in=config.FPN_filters + 2,
         head_layers=config.head_layers,
@@ -307,7 +307,7 @@ def ISMENet(config):
         feat_kernel_list.append(feat_kernel)
 
     # to build the mask output, we resize and add all FPN levels, except the extra levels > P5
-    mask_output, geom_feats = ISMENet_mask_head(
+    mask_output, geom_feats = RAMSES_mask_head(
         fpn_features[: -config.extra_FPN_layers],
         nconv=config.geom_feat_convs,
         in_ch=config.FPN_filters,
@@ -871,8 +871,8 @@ def compute_masks(
 ):
     """Compute mask
     inputs:
-        list of predicted class features form ISMENet head
-        list of predicted kernel features  from ISMENet head
+        list of predicted class features form RAMSES head
+        list of predicted kernel features  from RAMSES head
         feature maps from mask_head
         ...
 
@@ -903,11 +903,11 @@ def compute_masks(
     return seg_preds, scores, cls_labels, densities
 
 
-class ISMENetModel(tf.keras.Model):
+class RAMSESModel(tf.keras.Model):
     def __init__(self, config, **kwargs):
-        super(ISMENetModel, self).__init__(**kwargs)
+        super(RAMSESModel, self).__init__(**kwargs)
         self.config = config
-        self.model = ISMENet(config)
+        self.model = RAMSES(config)
         self.kernel_depth = config.mask_output_filters * config.kernel_size**2
         self.ncls = config.ncls
         self.strides = config.strides
